@@ -23,6 +23,7 @@ Use `pnpm` (lockfile present).
 - Rust uses standard `rustfmt` conventions (4-space indentation). Run `cargo fmt` in `src-tauri/` if you touch Rust code.
 - File naming follows Vite defaults (`App.jsx`, `main.jsx`) and Rust module naming in `src-tauri/src/`.
 - Code must include detailed Chinese comments explaining intent and behavior.
+- 发现未使用到的代码要即时移除，保持代码整洁。
 
 ## Testing Guidelines
 - No JS test runner is configured.
