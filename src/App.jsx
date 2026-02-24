@@ -21,9 +21,12 @@ import {
   Typography,
 } from "@mui/material";
 import { clear, readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { invoke } from "@tauri-apps/api/core";
 
 // 控制历史记录上限，避免长期运行导致内存压力过大
 const MAX_HISTORY = 80;
+// 详情编辑保存节流间隔，避免每次键入都触发数据库写入
+const DETAIL_SAVE_DELAY = 600;
 
 function App() {
   // 剪贴板历史列表，包含内容、时间、固定状态与命中次数等元信息
@@ -42,11 +45,17 @@ function App() {
   const [confirmAction, setConfirmAction] = useState("");
   // 控制确认弹窗是否显示，避免关闭动画期间文案闪动
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
+  // 标记历史记录是否已从数据库加载，避免加载前覆盖数据
+  const [isHistoryReady, setIsHistoryReady] = useState(false);
 
   // 记录最近一次读到的剪贴板内容，避免重复插入历史
   const lastClipboardRef = useRef("");
   // 标记由本应用写入剪贴板的内容，下一次轮询时跳过
   const skipNextRef = useRef("");
+  // 缓存详情编辑的保存计划，避免频繁写入数据库
+  const detailSaveTimerRef = useRef(null);
+  // 保存最新待提交的详情编辑内容，确保定时器触发时可获取最新值
+  const pendingDetailRef = useRef({ id: "", text: "" });
 
   // 过滤剪贴板为空或非文本内容导致的系统错误提示，避免打扰用户
   const isIgnorableClipboardError = (message) => {
@@ -72,10 +81,34 @@ function App() {
     };
   };
 
-  // 将文本写入历史记录：存在则更新计数并提升到顶部
-  const upsertItem = (text) => {
+  // 将数据库返回的数据合并回前端状态，保证去重并维持上限
+  const applyPersistedItem = (nextItem, removedId) => {
     setItems((prev) => {
-      const existingIndex = prev.findIndex((item) => item.text === text);
+      const filtered = prev.filter((item) => {
+        if (removedId && item.id === removedId) {
+          return false;
+        }
+        if (item.id === nextItem.id) {
+          return false;
+        }
+        if (item.text === nextItem.text && item.id !== nextItem.id) {
+          return false;
+        }
+        return true;
+      });
+      return [nextItem, ...filtered].slice(0, MAX_HISTORY);
+    });
+  };
+
+  // 将文本写入历史记录：存在则更新计数并提升到顶部，同时同步到数据库
+  const upsertItem = async (text) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return;
+    }
+    const draftItem = buildItem(trimmed);
+    setItems((prev) => {
+      const existingIndex = prev.findIndex((item) => item.text === trimmed);
       if (existingIndex >= 0) {
         const now = new Date().toISOString();
         const existing = prev[existingIndex];
@@ -87,8 +120,80 @@ function App() {
         const rest = prev.filter((_, index) => index !== existingIndex);
         return [updated, ...rest].slice(0, MAX_HISTORY);
       }
-      return [buildItem(text), ...prev].slice(0, MAX_HISTORY);
+      return [draftItem, ...prev].slice(0, MAX_HISTORY);
     });
+    try {
+      const persisted = await invoke("upsert_clipboard_item", {
+        item: draftItem,
+        maxItems: MAX_HISTORY,
+      });
+      applyPersistedItem(persisted, null);
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    }
+  };
+
+  // 从 SQLite 读取历史记录并恢复到前端，避免重启后只剩一条记录
+  const loadHistory = async () => {
+    try {
+      const history = await invoke("load_clipboard_history", {
+        limit: MAX_HISTORY,
+      });
+      setItems(history);
+      lastClipboardRef.current = history[0]?.text ?? "";
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    } finally {
+      setIsHistoryReady(true);
+    }
+  };
+
+  // 真正执行详情编辑写入，避免每次键入都触发 SQL
+  const persistDetailChange = async (payload) => {
+    if (!payload?.id) {
+      return;
+    }
+    try {
+      const result = await invoke("update_clipboard_item_text", {
+        id: payload.id,
+        text: payload.text,
+        updated_at: new Date().toISOString(),
+      });
+      applyPersistedItem(result.item, result.mergedId);
+      pendingDetailRef.current = { id: result.item.id, text: result.item.text };
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    }
+  };
+
+  // 详情文本变更时做节流保存，减少数据库频繁写入
+  const scheduleDetailPersist = (id, text) => {
+    if (!id) {
+      return;
+    }
+    pendingDetailRef.current = { id, text };
+    if (detailSaveTimerRef.current) {
+      clearTimeout(detailSaveTimerRef.current);
+    }
+    detailSaveTimerRef.current = setTimeout(() => {
+      const payload = pendingDetailRef.current;
+      persistDetailChange(payload);
+    }, DETAIL_SAVE_DELAY);
+  };
+
+  // 在失焦或切换条目前强制保存最后一次编辑，避免数据丢失
+  const flushDetailPersist = () => {
+    if (detailSaveTimerRef.current) {
+      clearTimeout(detailSaveTimerRef.current);
+      detailSaveTimerRef.current = null;
+    }
+    const payload = pendingDetailRef.current;
+    if (payload?.id) {
+      persistDetailChange(payload);
+    }
   };
 
   // 单次读取剪贴板，如果内容有效且非重复则写入历史
@@ -108,7 +213,7 @@ function App() {
         return;
       }
       lastClipboardRef.current = content;
-      upsertItem(content);
+      await upsertItem(content);
     } catch (error) {
       const message = error?.message ?? String(error);
       if (isIgnorableClipboardError(message)) {
@@ -128,7 +233,7 @@ function App() {
       await writeText(item.text, { label: "pure-paster" });
       skipNextRef.current = item.text;
       lastClipboardRef.current = item.text;
-      upsertItem(item.text);
+      await upsertItem(item.text);
     } catch (error) {
       setErrorMessage(error?.message ?? String(error));
     }
@@ -143,7 +248,7 @@ function App() {
       await writeText(draft.trim(), { label: "pure-paster" });
       skipNextRef.current = draft.trim();
       lastClipboardRef.current = draft.trim();
-      upsertItem(draft.trim());
+      await upsertItem(draft.trim());
       setDraft("");
     } catch (error) {
       setErrorMessage(error?.message ?? String(error));
@@ -151,9 +256,22 @@ function App() {
   };
 
   // 清空本地历史列表，不影响系统剪贴板内容
-  const handleClearHistory = () => {
+  const handleClearHistory = async () => {
     setItems([]);
     setSelectedId("");
+    lastClipboardRef.current = "";
+    skipNextRef.current = "";
+    pendingDetailRef.current = { id: "", text: "" };
+    if (detailSaveTimerRef.current) {
+      clearTimeout(detailSaveTimerRef.current);
+      detailSaveTimerRef.current = null;
+    }
+    try {
+      await invoke("clear_clipboard_history");
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    }
   };
 
   // 清空系统剪贴板，并重置本地缓存，避免旧值再次进入历史
@@ -184,7 +302,7 @@ function App() {
     const action = confirmAction;
     setIsConfirmOpen(false);
     if (action === "history") {
-      handleClearHistory();
+      await handleClearHistory();
       return;
     }
     if (action === "clipboard") {
@@ -197,6 +315,16 @@ function App() {
     setConfirmAction("");
   };
 
+  // 应用启动时先加载数据库中的历史记录，避免初始化时覆盖新数据
+  useEffect(() => {
+    loadHistory();
+    return () => {
+      if (detailSaveTimerRef.current) {
+        clearTimeout(detailSaveTimerRef.current);
+      }
+    };
+  }, []);
+
   // 更新详情文本内容，直接同步到历史列表中
   const handleDetailChange = (event) => {
     if (!selectedId) {
@@ -208,31 +336,52 @@ function App() {
         entry.id === selectedId ? { ...entry, text: nextText } : entry,
       ),
     );
+    scheduleDetailPersist(selectedId, nextText);
   };
 
   // 切换条目固定状态，用于置顶常用内容
-  const togglePin = (item) => {
+  const togglePin = async (item) => {
     if (!item) {
       return;
     }
+    const nextPinned = !item.pinned;
     setItems((prev) =>
       prev.map((entry) =>
-        entry.id === item.id ? { ...entry, pinned: !entry.pinned } : entry,
+        entry.id === item.id ? { ...entry, pinned: nextPinned } : entry,
       ),
     );
+    try {
+      const persisted = await invoke("set_clipboard_item_pinned", {
+        id: item.id,
+        pinned: nextPinned,
+      });
+      applyPersistedItem(persisted, null);
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    }
   };
 
   // 删除单条记录，并修正选中项避免悬空
-  const removeItem = (item) => {
+  const removeItem = async (item) => {
     if (!item) {
       return;
     }
     setItems((prev) => prev.filter((entry) => entry.id !== item.id));
+    if (pendingDetailRef.current.id === item.id) {
+      pendingDetailRef.current = { id: "", text: "" };
+    }
+    try {
+      await invoke("delete_clipboard_item", { id: item.id });
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    }
   };
 
   // 通过轮询实现剪贴板监听，支持随时暂停/恢复
   useEffect(() => {
-    if (!isMonitoring) {
+    if (!isMonitoring || !isHistoryReady) {
       return undefined;
     }
     captureClipboard();
@@ -240,7 +389,7 @@ function App() {
       captureClipboard();
     }, 1200);
     return () => clearInterval(timer);
-  }, [isMonitoring]);
+  }, [isMonitoring, isHistoryReady]);
 
   // 根据搜索词过滤并排序：固定条目优先，其次按更新时间倒序
   const visibleItems = useMemo(() => {
@@ -368,7 +517,7 @@ function App() {
             </Stack>
 
             {errorMessage ? (
-              <Alert severity="error">剪贴板访问失败：{errorMessage}</Alert>
+              <Alert severity="error">操作失败：{errorMessage}</Alert>
             ) : null}
 
             <Divider />
@@ -497,6 +646,7 @@ function App() {
                   placeholder="请选择条目"
                   value={selectedItem?.text ?? ""}
                   onChange={handleDetailChange}
+                  onBlur={flushDetailPersist}
                   disabled={!selectedItem}
                 />
                 <Stack direction="row" spacing={1} flexWrap="wrap">
