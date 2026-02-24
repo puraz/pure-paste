@@ -68,7 +68,7 @@ jobs:
 
       # 构建并产出安装包，产物会作为 workflow artifacts 上传
       - name: "Build Tauri bundles"
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
