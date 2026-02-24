@@ -6,6 +6,11 @@ import {
   Chip,
   Container,
   Divider,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   List,
   ListItemButton,
   ListItemText,
@@ -33,6 +38,10 @@ function App() {
   const [draft, setDraft] = useState("");
   // 最近一次错误信息，便于排查权限或系统剪贴板异常
   const [errorMessage, setErrorMessage] = useState("");
+  // 记录用户准备执行的清空动作类型，用于控制确认弹窗内容
+  const [confirmAction, setConfirmAction] = useState("");
+  // 控制确认弹窗是否显示，避免关闭动画期间文案闪动
+  const [isConfirmOpen, setIsConfirmOpen] = useState(false);
 
   // 记录最近一次读到的剪贴板内容，避免重复插入历史
   const lastClipboardRef = useRef("");
@@ -159,6 +168,48 @@ function App() {
     }
   };
 
+  // 请求清空动作时先弹出确认提示，避免误触直接清空
+  const requestClear = (type) => {
+    setConfirmAction(type);
+    setIsConfirmOpen(true);
+  };
+
+  // 关闭确认弹窗，不执行清空
+  const cancelClear = () => {
+    setIsConfirmOpen(false);
+  };
+
+  // 用户确认后执行对应的清空动作
+  const confirmClear = async () => {
+    const action = confirmAction;
+    setIsConfirmOpen(false);
+    if (action === "history") {
+      handleClearHistory();
+      return;
+    }
+    if (action === "clipboard") {
+      await handleClearClipboard();
+    }
+  };
+
+  // 弹窗完全关闭后再清空动作类型，避免出现文本闪烁
+  const handleConfirmExited = () => {
+    setConfirmAction("");
+  };
+
+  // 更新详情文本内容，直接同步到历史列表中
+  const handleDetailChange = (event) => {
+    if (!selectedId) {
+      return;
+    }
+    const nextText = event.target.value;
+    setItems((prev) =>
+      prev.map((entry) =>
+        entry.id === selectedId ? { ...entry, text: nextText } : entry,
+      ),
+    );
+  };
+
   // 切换条目固定状态，用于置顶常用内容
   const togglePin = (item) => {
     if (!item) {
@@ -283,7 +334,7 @@ function App() {
                 <Chip label={`条目 ${items.length}`} size="small" />
                 <Chip label={`固定 ${pinnedCount}`} size="small" color="secondary" />
               </Stack>
-              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
                 <TextField
                   size="small"
                   placeholder="搜索"
@@ -299,10 +350,18 @@ function App() {
                   />
                   <Typography variant="caption">监听</Typography>
                 </Stack>
-                <Button variant="outlined" size="small" onClick={handleClearHistory}>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => requestClear("history")}
+                >
                   清空历史
                 </Button>
-                <Button variant="outlined" size="small" onClick={handleClearClipboard}>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  onClick={() => requestClear("clipboard")}
+                >
                   清空剪贴板
                 </Button>
               </Stack>
@@ -437,7 +496,8 @@ function App() {
                   minRows={6}
                   placeholder="请选择条目"
                   value={selectedItem?.text ?? ""}
-                  InputProps={{ readOnly: true }}
+                  onChange={handleDetailChange}
+                  disabled={!selectedItem}
                 />
                 <Stack direction="row" spacing={1} flexWrap="wrap">
                   <Button
@@ -498,6 +558,29 @@ function App() {
           </Stack>
         </Paper>
       </Container>
+      {/* 清空操作的确认弹窗，避免误触造成数据丢失 */}
+      <Dialog
+        open={isConfirmOpen}
+        onClose={cancelClear}
+        TransitionProps={{ onExited: handleConfirmExited }}
+      >
+        <DialogTitle>确认清空</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            {confirmAction === "history"
+              ? "确定要清空全部历史记录吗？此操作不可撤销。"
+              : "确定要清空系统剪贴板吗？清空后无法恢复。"}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button variant="outlined" onClick={cancelClear}>
+            取消
+          </Button>
+          <Button variant="contained" color="secondary" onClick={confirmClear}>
+            确认清空
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
