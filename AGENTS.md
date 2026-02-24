@@ -19,6 +19,7 @@ Use `pnpm` (lockfile present).
 
 ## Coding Style & Naming Conventions
 - JavaScript/JSX uses 2-space indentation, semicolons, and double quotes (match existing style in `src/App.jsx`).
+- Frontend UI uses Material UI (MUI); prefer MUI components and theming for new UI work.
 - Rust uses standard `rustfmt` conventions (4-space indentation). Run `cargo fmt` in `src-tauri/` if you touch Rust code.
 - File naming follows Vite defaults (`App.jsx`, `main.jsx`) and Rust module naming in `src-tauri/src/`.
 - Code must include detailed Chinese comments explaining intent and behavior.
