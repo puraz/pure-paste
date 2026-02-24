@@ -27,8 +27,8 @@ jobs:
           - platform: ubuntu-22.04
             args: ""
     permissions:
-      # 仅需要读取仓库内容即可构建
-      contents: read
+      # 需要写权限以便创建/更新 Release 并上传安装包
+      contents: write
     steps:
       # 拉取代码
       - name: "Checkout"
@@ -72,6 +72,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          # 使用应用版本号生成 Release（__VERSION__ 会被替换为 tauri.conf.json 的版本）
+          tagName: "v__VERSION__"
+          # Release 展示名
+          releaseName: "v__VERSION__"
+          # Release 描述（可按需补充）
+          releaseBody: "See the assets to download and install this version."
+          # 是否为草稿发布，按需切换
+          releaseDraft: false
+          # 是否为预发布，按需切换
+          prerelease: false
           args: ${{ matrix.args }}
           uploadWorkflowArtifacts: true
           # 统一命名，便于区分平台/架构/包类型
