@@ -1,0 +1,78 @@
+name: "tauri-packages"
+
+on:
+  # 手动触发，便于随时打包
+  workflow_dispatch:
+  # 打 tag 时自动打包，tag 格式示例：v0.1.0
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    # 每个平台单独构建，避免互相影响
+    name: "build-${{ matrix.platform }}"
+    runs-on: ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS 产出 dmg
+          - platform: macos-latest
+            args: ""
+          # Windows 产出 exe（NSIS 安装包）
+          - platform: windows-latest
+            args: ""
+          # Linux 产出 deb
+          - platform: ubuntu-22.04
+            args: ""
+    permissions:
+      # 仅需要读取仓库内容即可构建
+      contents: read
+    steps:
+      # 拉取代码
+      - name: "Checkout"
+        uses: actions/checkout@v4
+
+      # 安装 pnpm
+      - name: "Setup pnpm"
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      # 安装 Node.js 并启用 pnpm 缓存
+      - name: "Setup Node"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      # 安装 Rust 工具链
+      - name: "Setup Rust"
+        uses: dtolnay/rust-toolchain@stable
+
+      # 安装 Linux 打包依赖（Tauri WebView 与打包工具链）
+      - name: "Install Linux dependencies"
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      # 安装前端依赖
+      - name: "Install frontend dependencies"
+        run: pnpm install --frozen-lockfile
+
+      # 构建并产出安装包，产物会作为 workflow artifacts 上传
+      - name: "Build Tauri bundles"
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: ${{ matrix.args }}
+          uploadWorkflowArtifacts: true
+          # 统一命名，便于区分平台/架构/包类型
+          workflowArtifactNamePattern: "[platform]-[arch]-[bundle]"
