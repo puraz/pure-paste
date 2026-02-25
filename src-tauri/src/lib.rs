@@ -673,9 +673,13 @@ pub fn run() {
                 app.exit(0);
             }
         })
-        // 点击托盘图标时显示主窗口，避免用户误以为应用已退出
+        // 仅左键点击托盘图标时显示主窗口，右键只负责弹出菜单避免误触打开
         .on_tray_icon_event(|app, event| {
-            if matches!(event, tauri::tray::TrayIconEvent::Click { .. }) {
+            if let tauri::tray::TrayIconEvent::Click {
+                button: tauri::tray::MouseButton::Left,
+                ..
+            } = event
+            {
                 show_main_window(app);
             }
         })
