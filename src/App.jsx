@@ -23,6 +23,7 @@ import {
 import { clear, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // 控制历史记录上限，避免长期运行导致内存压力过大
 const MAX_HISTORY = 80;
@@ -46,8 +47,21 @@ function App() {
   const [confirmAction, setConfirmAction] = useState("");
   // 控制确认弹窗是否显示，避免关闭动画期间文案闪动
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
-  // 标记历史记录是否已从数据库加载，避免加载前覆盖数据
-  const [isHistoryReady, setIsHistoryReady] = useState(false);
+  // 记录系统开机自启动状态，供设置页开关展示
+  const [autostartEnabled, setAutostartEnabled] = useState(false);
+  // 记录开机自启动读取/切换过程，避免频繁点击导致状态错乱
+  const [isAutostartLoading, setIsAutostartLoading] = useState(false);
+  // 记录监听状态是否已读取完成，避免首次进入时覆盖后台状态
+  const [isMonitoringReady, setIsMonitoringReady] = useState(false);
+
+  // 识别当前窗口类型，用于区分主窗口与设置窗口渲染
+  const isSettingsWindow = useMemo(() => {
+    try {
+      return getCurrentWindow().label === "settings";
+    } catch {
+      return false;
+    }
+  }, []);
 
   // 缓存详情编辑的保存计划，避免频繁写入数据库
   const detailSaveTimerRef = useRef(null);
@@ -137,9 +151,67 @@ function App() {
     } catch (error) {
       setErrorMessage(error?.message ?? String(error));
     } finally {
-      setIsHistoryReady(true);
+      setIsMonitoringReady(true);
     }
   };
+
+  // 仅加载监听状态，供设置窗口初始化使用
+  const loadMonitoringStatus = async () => {
+    try {
+      const monitoring = await invoke("get_clipboard_monitoring");
+      if (typeof monitoring === "boolean") {
+        setIsMonitoring(monitoring);
+      }
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    } finally {
+      setIsMonitoringReady(true);
+    }
+  };
+
+  // 读取系统开机自启动状态，保证设置页开关与真实状态一致
+  const loadAutostartStatus = async () => {
+    setIsAutostartLoading(true);
+    try {
+      const enabled = await invoke("get_autostart_status");
+      setAutostartEnabled(Boolean(enabled));
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    } finally {
+      setIsAutostartLoading(false);
+    }
+  };
+
+  // 切换开机自启动开关，失败时回滚到之前状态
+  const handleAutostartToggle = async (event) => {
+    const targetEnabled = event.target.checked;
+    setAutostartEnabled(targetEnabled);
+    setIsAutostartLoading(true);
+    try {
+      const actual = await invoke("set_autostart_enabled", {
+        enabled: targetEnabled,
+      });
+      setAutostartEnabled(Boolean(actual));
+      setErrorMessage("");
+    } catch (error) {
+      setAutostartEnabled(!targetEnabled);
+      setErrorMessage(error?.message ?? String(error));
+    } finally {
+      setIsAutostartLoading(false);
+    }
+  };
+
+  // 打开设置窗口，供主窗口或托盘入口复用
+  const openSettingsWindow = async () => {
+    try {
+      await invoke("open_settings_window_command");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    }
+  };
+
 
   // 真正执行详情编辑写入，避免每次键入都触发 SQL
   const persistDetailChange = async (payload) => {
@@ -274,16 +346,24 @@ function App() {
 
   // 应用启动时先加载数据库中的历史记录，避免初始化时覆盖新数据
   useEffect(() => {
+    if (isSettingsWindow) {
+      loadMonitoringStatus();
+      loadAutostartStatus();
+      return;
+    }
     loadHistory();
     return () => {
       if (detailSaveTimerRef.current) {
         clearTimeout(detailSaveTimerRef.current);
       }
     };
-  }, []);
+  }, [isSettingsWindow]);
 
   // 监听后台推送的剪贴板更新事件，保证窗口打开时实时刷新列表
   useEffect(() => {
+    if (isSettingsWindow) {
+      return;
+    }
     let unlisten = null;
     const registerListener = async () => {
       try {
@@ -304,17 +384,17 @@ function App() {
         unlisten();
       }
     };
-  }, []);
+  }, [isSettingsWindow]);
 
   // 将监听开关同步到后台，确保关闭窗口后仍遵循用户设置
   useEffect(() => {
-    if (!isHistoryReady) {
+    if (!isMonitoringReady) {
       return;
     }
     invoke("set_clipboard_monitoring", { enabled: isMonitoring }).catch((error) => {
       setErrorMessage(error?.message ?? String(error));
     });
-  }, [isMonitoring, isHistoryReady]);
+  }, [isMonitoring, isMonitoringReady]);
 
   // 更新详情文本内容，直接同步到历史列表中
   const handleDetailChange = (event) => {
@@ -441,250 +521,343 @@ function App() {
             overflow: "hidden",
           }}
         >
-          <Stack
-            spacing={1.5}
-            sx={{
-              // 允许子区域在固定高度内收缩，并把滚动限制在内部
-              flex: 1,
-              minHeight: 0,
-            }}
-          >
+          {isSettingsWindow ? (
             <Stack
-              direction={{ xs: "column", md: "row" }}
-              spacing={1.5}
-              alignItems={{ xs: "flex-start", md: "center" }}
-              justifyContent="space-between"
-            >
-              <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap">
-                <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                  剪贴板
-                </Typography>
-                <Chip label={`条目 ${items.length}`} size="small" />
-                <Chip label={`固定 ${pinnedCount}`} size="small" color="secondary" />
-              </Stack>
-              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                <TextField
-                  size="small"
-                  placeholder="搜索"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                />
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <Switch
-                    size="small"
-                    checked={isMonitoring}
-                    onChange={(event) => setIsMonitoring(event.target.checked)}
-                    color="secondary"
-                  />
-                  <Typography variant="caption">监听</Typography>
-                </Stack>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => requestClear("history")}
-                >
-                  清空历史
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => requestClear("clipboard")}
-                >
-                  清空剪贴板
-                </Button>
-              </Stack>
-            </Stack>
-
-            {errorMessage ? (
-              <Alert severity="error">操作失败：{errorMessage}</Alert>
-            ) : null}
-
-            <Divider />
-
-            <Stack
-              direction={{ xs: "column", md: "row" }}
               spacing={1.5}
               sx={{
-                // 主内容区占满剩余高度，左右面板保持同高
+                // 设置页同样占满卡片可用高度，避免布局跳动
                 flex: 1,
                 minHeight: 0,
               }}
             >
-              <Paper
-                variant="outlined"
-                sx={{
-                  width: { xs: "100%", md: 320 },
-                  borderRadius: 1.5,
-                  display: "flex",
-                  flexDirection: "column",
-                  // 让左侧面板在固定卡片内填满高度
-                  minHeight: 0,
-                }}
-              >
-                <Stack
-                  direction="row"
-                  justifyContent="space-between"
-                  alignItems="center"
-                  sx={{ px: 2, py: 1.5 }}
-                >
-                  <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                    历史
-                  </Typography>
-                </Stack>
-                <Divider />
-                <Box
-                  sx={{
-                    // 历史列表高度固定为面板剩余空间，内容过多时内部滚动
-                    flex: 1,
-                    minHeight: 0,
-                    overflowY: "auto",
-                  }}
-                >
-                  {visibleItems.length ? (
-                    <List dense disablePadding>
-                      {visibleItems.map((item) => {
-                        const isSelected = item.id === selectedId;
-                        return (
-                          <ListItemButton
-                            key={item.id}
-                            selected={isSelected}
-                            onClick={() => setSelectedId(item.id)}
-                            sx={{
-                              alignItems: "flex-start",
-                              borderBottom: "1px solid rgba(15, 23, 42, 0.06)",
-                            }}
-                          >
-                            <ListItemText
-                              primary={item.text}
-                              secondary={`${new Intl.DateTimeFormat("zh-CN", {
-                                month: "2-digit",
-                                day: "2-digit",
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              }).format(new Date(item.updatedAt))}${
-                                item.count > 1 ? ` · ${item.count} 次` : ""
-                              }`}
-                              primaryTypographyProps={{
-                                noWrap: true,
-                                sx: { fontWeight: 500 },
-                              }}
-                              secondaryTypographyProps={{
-                                variant: "caption",
-                                sx: { color: "text.secondary" },
-                              }}
-                            />
-                            {item.pinned ? (
-                              <Chip
-                                label="固定"
-                                size="small"
-                                color="secondary"
-                                sx={{ ml: 1 }}
-                              />
-                            ) : null}
-                          </ListItemButton>
-                        );
-                      })}
-                    </List>
-                  ) : (
-                    <Typography
-                      variant="body2"
-                      sx={{ color: "text.secondary", px: 2, py: 3 }}
-                    >
-                      暂无内容
-                    </Typography>
-                  )}
-                </Box>
-              </Paper>
+              {errorMessage ? (
+                <Alert severity="error">操作失败：{errorMessage}</Alert>
+              ) : null}
 
+              {/* 开机自启动开关区域，便于用户理解系统级行为 */}
               <Paper
                 variant="outlined"
                 sx={{
-                  flex: 1,
-                  p: 1.5,
+                  p: 2,
                   borderRadius: 1.5,
                   display: "flex",
                   flexDirection: "column",
                   gap: 1.5,
-                  // 右侧详情区同样限制在固定高度内，必要时内部滚动
-                  minHeight: 0,
-                  overflowY: "auto",
                 }}
               >
-                <Stack direction="row" alignItems="center" justifyContent="space-between">
-                  <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                    详情
-                  </Typography>
-                  {selectedItem?.pinned ? (
-                    <Chip label="已固定" size="small" color="secondary" />
-                  ) : null}
+                <Stack
+                  direction="row"
+                  spacing={1.5}
+                  alignItems="center"
+                  justifyContent="space-between"
+                >
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                      开机自启动
+                    </Typography>
+                    <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                      应用随系统启动自动运行
+                    </Typography>
+                  </Box>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Switch
+                      size="small"
+                      checked={autostartEnabled}
+                      onChange={handleAutostartToggle}
+                      color="secondary"
+                      disabled={isAutostartLoading}
+                    />
+                    <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                      {isAutostartLoading
+                        ? "读取中..."
+                        : autostartEnabled
+                          ? "已开启"
+                          : "已关闭"}
+                    </Typography>
+                  </Stack>
                 </Stack>
-                <TextField
-                  size="small"
-                  multiline
-                  minRows={6}
-                  placeholder="请选择条目"
-                  value={selectedItem?.text ?? ""}
-                  onChange={handleDetailChange}
-                  onBlur={flushDetailPersist}
-                  disabled={!selectedItem}
-                />
-                <Stack direction="row" spacing={1} flexWrap="wrap">
-                  <Button
-                    variant="contained"
-                    size="small"
-                    onClick={() => handleCopy(selectedItem)}
-                    disabled={!selectedItem}
-                  >
-                    复制
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={() => togglePin(selectedItem)}
-                    disabled={!selectedItem}
-                  >
-                    {selectedItem?.pinned ? "取消固定" : "固定"}
-                  </Button>
-                  <Button
-                    variant="text"
-                    color="secondary"
-                    size="small"
-                    onClick={() => removeItem(selectedItem)}
-                    disabled={!selectedItem}
-                  >
-                    删除
-                  </Button>
-                </Stack>
+              </Paper>
 
-                <Divider />
-
-                <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                  写入
-                </Typography>
-                <TextField
-                  size="small"
-                  multiline
-                  minRows={3}
-                  placeholder="输入文本"
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                />
-                <Stack direction="row" spacing={1}>
-                  <Button variant="contained" size="small" onClick={handleWrite}>
-                    写入剪贴板
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={() => setDraft("")}
-                    disabled={!draft}
-                  >
-                    清空
-                  </Button>
+              {/* 剪贴板监听开关，控制后台是否持续记录 */}
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 2,
+                  borderRadius: 1.5,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 1.5,
+                }}
+              >
+                <Stack
+                  direction="row"
+                  spacing={1.5}
+                  alignItems="center"
+                  justifyContent="space-between"
+                >
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                      剪贴板监听
+                    </Typography>
+                    <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                      关闭后将不再自动记录剪贴板
+                    </Typography>
+                  </Box>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Switch
+                      size="small"
+                      checked={isMonitoring}
+                      onChange={(event) => setIsMonitoring(event.target.checked)}
+                      color="secondary"
+                      disabled={!isMonitoringReady}
+                    />
+                    <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                      {isMonitoringReady ? (isMonitoring ? "已开启" : "已关闭") : "读取中..."}
+                    </Typography>
+                  </Stack>
                 </Stack>
               </Paper>
             </Stack>
+          ) : (
+            <Stack
+              spacing={1.5}
+              sx={{
+                // 允许子区域在固定高度内收缩，并把滚动限制在内部
+                flex: 1,
+                minHeight: 0,
+              }}
+            >
+              <Stack
+                direction={{ xs: "column", md: "row" }}
+                spacing={1.5}
+                alignItems={{ xs: "flex-start", md: "center" }}
+                justifyContent="space-between"
+              >
+                <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap">
+                  <Typography variant="h6" sx={{ fontWeight: 700 }}>
+                    剪贴板
+                  </Typography>
+                  <Chip label={`条目 ${items.length}`} size="small" />
+                  <Chip label={`固定 ${pinnedCount}`} size="small" color="secondary" />
+                </Stack>
+                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                  <TextField
+                    size="small"
+                    placeholder="搜索"
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={() => requestClear("history")}
+                  >
+                    清空历史
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={() => requestClear("clipboard")}
+                  >
+                    清空剪贴板
+                  </Button>
+                  <Button variant="text" size="small" onClick={openSettingsWindow}>
+                    设置
+                  </Button>
+                </Stack>
+              </Stack>
+
+              {errorMessage ? (
+                <Alert severity="error">操作失败：{errorMessage}</Alert>
+              ) : null}
+
+              <Divider />
+
+              <Stack
+                direction={{ xs: "column", md: "row" }}
+                spacing={1.5}
+                sx={{
+                  // 主内容区占满剩余高度，左右面板保持同高
+                  flex: 1,
+                  minHeight: 0,
+                }}
+              >
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    width: { xs: "100%", md: 320 },
+                    borderRadius: 1.5,
+                    display: "flex",
+                    flexDirection: "column",
+                    // 让左侧面板在固定卡片内填满高度
+                    minHeight: 0,
+                  }}
+                >
+                  <Stack
+                    direction="row"
+                    justifyContent="space-between"
+                    alignItems="center"
+                    sx={{ px: 2, py: 1.5 }}
+                  >
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                      历史
+                    </Typography>
+                  </Stack>
+                  <Divider />
+                  <Box
+                    sx={{
+                      // 历史列表高度固定为面板剩余空间，内容过多时内部滚动
+                      flex: 1,
+                      minHeight: 0,
+                      overflowY: "auto",
+                    }}
+                  >
+                    {visibleItems.length ? (
+                      <List dense disablePadding>
+                        {visibleItems.map((item) => {
+                          const isSelected = item.id === selectedId;
+                          return (
+                            <ListItemButton
+                              key={item.id}
+                              selected={isSelected}
+                              onClick={() => setSelectedId(item.id)}
+                              sx={{
+                                alignItems: "flex-start",
+                                borderBottom: "1px solid rgba(15, 23, 42, 0.06)",
+                              }}
+                            >
+                              <ListItemText
+                                primary={item.text}
+                                secondary={`${new Intl.DateTimeFormat("zh-CN", {
+                                  month: "2-digit",
+                                  day: "2-digit",
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                }).format(new Date(item.updatedAt))}${
+                                  item.count > 1 ? ` · ${item.count} 次` : ""
+                                }`}
+                                primaryTypographyProps={{
+                                  noWrap: true,
+                                  sx: { fontWeight: 500 },
+                                }}
+                                secondaryTypographyProps={{
+                                  variant: "caption",
+                                  sx: { color: "text.secondary" },
+                                }}
+                              />
+                              {item.pinned ? (
+                                <Chip
+                                  label="固定"
+                                  size="small"
+                                  color="secondary"
+                                  sx={{ ml: 1 }}
+                                />
+                              ) : null}
+                            </ListItemButton>
+                          );
+                        })}
+                      </List>
+                    ) : (
+                      <Typography
+                        variant="body2"
+                        sx={{ color: "text.secondary", px: 2, py: 3 }}
+                      >
+                        暂无内容
+                      </Typography>
+                    )}
+                  </Box>
+                </Paper>
+
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    flex: 1,
+                    p: 1.5,
+                    borderRadius: 1.5,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 1.5,
+                    // 右侧详情区同样限制在固定高度内，必要时内部滚动
+                    minHeight: 0,
+                    overflowY: "auto",
+                  }}
+                >
+                  <Stack direction="row" alignItems="center" justifyContent="space-between">
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                      详情
+                    </Typography>
+                    {selectedItem?.pinned ? (
+                      <Chip label="已固定" size="small" color="secondary" />
+                    ) : null}
+                  </Stack>
+                  <TextField
+                    size="small"
+                    multiline
+                    minRows={6}
+                    placeholder="请选择条目"
+                    value={selectedItem?.text ?? ""}
+                    onChange={handleDetailChange}
+                    onBlur={flushDetailPersist}
+                    disabled={!selectedItem}
+                  />
+                  <Stack direction="row" spacing={1} flexWrap="wrap">
+                    <Button
+                      variant="contained"
+                      size="small"
+                      onClick={() => handleCopy(selectedItem)}
+                      disabled={!selectedItem}
+                    >
+                      复制
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={() => togglePin(selectedItem)}
+                      disabled={!selectedItem}
+                    >
+                      {selectedItem?.pinned ? "取消固定" : "固定"}
+                    </Button>
+                    <Button
+                      variant="text"
+                      color="secondary"
+                      size="small"
+                      onClick={() => removeItem(selectedItem)}
+                      disabled={!selectedItem}
+                    >
+                      删除
+                    </Button>
+                  </Stack>
+
+                  <Divider />
+
+                  <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                    写入
+                  </Typography>
+                  <TextField
+                    size="small"
+                    multiline
+                    minRows={3}
+                    placeholder="输入文本"
+                    value={draft}
+                    onChange={(event) => setDraft(event.target.value)}
+                  />
+                  <Stack direction="row" spacing={1}>
+                    <Button variant="contained" size="small" onClick={handleWrite}>
+                      写入剪贴板
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={() => setDraft("")}
+                      disabled={!draft}
+                    >
+                      清空
+                    </Button>
+                  </Stack>
+                </Paper>
+              </Stack>
           </Stack>
+          )}
         </Paper>
       </Container>
       {/* 清空操作的确认弹窗，避免误触造成数据丢失 */}

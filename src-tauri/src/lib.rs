@@ -14,6 +14,7 @@ use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::tray::TrayIconBuilder;
 #[cfg(desktop)]
 use arboard::Clipboard;
+use tauri_plugin_autostart::ManagerExt;
 
 // 优先使用固定尺寸托盘图标，避免默认图标过大导致菜单栏不可见
 #[cfg(desktop)]
@@ -36,6 +37,33 @@ struct AppState {
     skip_next_text: Mutex<Option<String>>,
     // 仅允许通过托盘菜单退出应用，其他退出请求需要被拦截
     allow_exit: AtomicBool,
+}
+
+// 打开或聚焦设置窗口，避免重复创建并确保跨平台稳定
+#[cfg(desktop)]
+fn open_settings_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("settings") {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return;
+    }
+    let app_handle = app.clone();
+    std::thread::spawn(move || {
+        let window = tauri::WebviewWindowBuilder::new(
+            &app_handle,
+            "settings",
+            tauri::WebviewUrl::App("index.html".into()),
+        )
+        .title("设置")
+        .inner_size(520.0, 360.0)
+        .resizable(false)
+        .skip_taskbar(true)
+        .build();
+        if let Ok(window) = window {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    });
 }
 
 // 与前端保持一致的历史记录上限，避免后台监听撑爆数据库
@@ -585,6 +613,35 @@ fn mark_clipboard_skip(state: State<AppState>, text: String) -> Result<(), Strin
     Ok(())
 }
 
+// 获取当前系统开机自启动状态，供设置页初始化使用
+#[tauri::command]
+fn get_autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
+    let manager = app.autolaunch();
+    manager.is_enabled().map_err(|err| err.to_string())
+}
+
+// 切换系统开机自启动状态，并返回实际结果避免前端与系统状态不一致
+#[tauri::command]
+fn set_autostart_enabled(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|err| err.to_string())?;
+    } else {
+        manager.disable().map_err(|err| err.to_string())?;
+    }
+    manager.is_enabled().map_err(|err| err.to_string())
+}
+
+// 托盘或前端触发打开设置窗口，避免多处重复创建逻辑
+#[tauri::command]
+fn open_settings_window_command(app: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        open_settings_window(&app);
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 注册剪贴板插件，并在启动时初始化 SQLite，确保历史记录持久化
@@ -614,13 +671,23 @@ pub fn run() {
             });
             #[cfg(desktop)]
             {
+                // 初始化开机自启动插件，保证设置页可以读取/切换系统自启动状态
+                app.handle()
+                    .plugin(tauri_plugin_autostart::init(
+                        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+                        None::<Vec<&'static str>>,
+                    ))
+                    .map_err(|err| err.to_string())?;
                 // 创建托盘菜单，确保应用关闭窗口后仍可快速唤起
                 let show_item =
                     MenuItem::with_id(app, "show", "打开", true, None::<&str>)?;
+                let settings_item =
+                    MenuItem::with_id(app, "settings", "设置", true, None::<&str>)?;
                 let quit_item =
                     MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
                 let tray_menu = MenuBuilder::new(app)
                     .item(&show_item)
+                    .item(&settings_item)
                     .separator()
                     .item(&quit_item)
                     .build()?;
@@ -656,14 +723,21 @@ pub fn run() {
             clear_clipboard_history,
             set_clipboard_monitoring,
             get_clipboard_monitoring,
-            mark_clipboard_skip
+            mark_clipboard_skip,
+            get_autostart_status,
+            set_autostart_enabled,
+            open_settings_window_command
         ]);
     #[cfg(desktop)]
     let builder = builder
-        // 托盘菜单与主菜单共享同一事件回调，统一处理“打开/退出”
+        // 托盘菜单与主菜单共享同一事件回调，统一处理“打开/设置/退出”
         .on_menu_event(|app, event| {
             if event.id() == "show" {
                 show_main_window(app);
+            }
+            if event.id() == "settings" {
+                // 打开或聚焦设置窗口
+                open_settings_window(app);
             }
             if event.id() == "quit" {
                 // 标记为允许退出，确保只通过托盘菜单触发真正退出
