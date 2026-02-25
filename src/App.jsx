@@ -20,8 +20,9 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { clear, readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { clear, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 // 控制历史记录上限，避免长期运行导致内存压力过大
 const MAX_HISTORY = 80;
@@ -35,7 +36,7 @@ function App() {
   const [selectedId, setSelectedId] = useState("");
   // 搜索输入，用于过滤历史列表
   const [query, setQuery] = useState("");
-  // 是否开启剪贴板监听（轮询读取）
+  // 是否开启剪贴板监听（后台守护任务）
   const [isMonitoring, setIsMonitoring] = useState(true);
   // 手动写入剪贴板的输入内容
   const [draft, setDraft] = useState("");
@@ -48,25 +49,10 @@ function App() {
   // 标记历史记录是否已从数据库加载，避免加载前覆盖数据
   const [isHistoryReady, setIsHistoryReady] = useState(false);
 
-  // 记录最近一次读到的剪贴板内容，避免重复插入历史
-  const lastClipboardRef = useRef("");
-  // 标记由本应用写入剪贴板的内容，下一次轮询时跳过
-  const skipNextRef = useRef("");
   // 缓存详情编辑的保存计划，避免频繁写入数据库
   const detailSaveTimerRef = useRef(null);
   // 保存最新待提交的详情编辑内容，确保定时器触发时可获取最新值
   const pendingDetailRef = useRef({ id: "", text: "" });
-
-  // 过滤剪贴板为空或非文本内容导致的系统错误提示，避免打扰用户
-  const isIgnorableClipboardError = (message) => {
-    const normalized = String(message).toLowerCase();
-    return (
-      normalized.includes("clipboard contents were not available") ||
-      normalized.includes("clipboard is empty") ||
-      normalized.includes("requested format") ||
-      normalized.includes("not available")
-    );
-  };
 
   // 创建一条标准化的历史记录结构
   const buildItem = (text) => {
@@ -137,11 +123,16 @@ function App() {
   // 从 SQLite 读取历史记录并恢复到前端，避免重启后只剩一条记录
   const loadHistory = async () => {
     try {
-      const history = await invoke("load_clipboard_history", {
-        limit: MAX_HISTORY,
-      });
+      const [history, monitoring] = await Promise.all([
+        invoke("load_clipboard_history", {
+          limit: MAX_HISTORY,
+        }),
+        invoke("get_clipboard_monitoring"),
+      ]);
       setItems(history);
-      lastClipboardRef.current = history[0]?.text ?? "";
+      if (typeof monitoring === "boolean") {
+        setIsMonitoring(monitoring);
+      }
       setErrorMessage("");
     } catch (error) {
       setErrorMessage(error?.message ?? String(error));
@@ -159,7 +150,7 @@ function App() {
       const result = await invoke("update_clipboard_item_text", {
         id: payload.id,
         text: payload.text,
-        updated_at: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       });
       applyPersistedItem(result.item, result.mergedId);
       pendingDetailRef.current = { id: result.item.id, text: result.item.text };
@@ -196,34 +187,6 @@ function App() {
     }
   };
 
-  // 单次读取剪贴板，如果内容有效且非重复则写入历史
-  const captureClipboard = async () => {
-    try {
-      const content = await readText();
-      setErrorMessage("");
-      if (!content || !content.trim()) {
-        return;
-      }
-      if (skipNextRef.current && content === skipNextRef.current) {
-        skipNextRef.current = "";
-        lastClipboardRef.current = content;
-        return;
-      }
-      if (content === lastClipboardRef.current) {
-        return;
-      }
-      lastClipboardRef.current = content;
-      await upsertItem(content);
-    } catch (error) {
-      const message = error?.message ?? String(error);
-      if (isIgnorableClipboardError(message)) {
-        setErrorMessage("");
-        return;
-      }
-      setErrorMessage(message);
-    }
-  };
-
   // 将选中条目复制回系统剪贴板，同时刷新本地排序与计数
   const handleCopy = async (item) => {
     if (!item) {
@@ -231,8 +194,7 @@ function App() {
     }
     try {
       await writeText(item.text, { label: "pure-paster" });
-      skipNextRef.current = item.text;
-      lastClipboardRef.current = item.text;
+      await invoke("mark_clipboard_skip", { text: item.text });
       await upsertItem(item.text);
     } catch (error) {
       setErrorMessage(error?.message ?? String(error));
@@ -246,8 +208,7 @@ function App() {
     }
     try {
       await writeText(draft.trim(), { label: "pure-paster" });
-      skipNextRef.current = draft.trim();
-      lastClipboardRef.current = draft.trim();
+      await invoke("mark_clipboard_skip", { text: draft.trim() });
       await upsertItem(draft.trim());
       setDraft("");
     } catch (error) {
@@ -259,8 +220,6 @@ function App() {
   const handleClearHistory = async () => {
     setItems([]);
     setSelectedId("");
-    lastClipboardRef.current = "";
-    skipNextRef.current = "";
     pendingDetailRef.current = { id: "", text: "" };
     if (detailSaveTimerRef.current) {
       clearTimeout(detailSaveTimerRef.current);
@@ -274,12 +233,10 @@ function App() {
     }
   };
 
-  // 清空系统剪贴板，并重置本地缓存，避免旧值再次进入历史
+  // 清空系统剪贴板，避免旧值继续触发后台记录
   const handleClearClipboard = async () => {
     try {
       await clear();
-      skipNextRef.current = "";
-      lastClipboardRef.current = "";
       setErrorMessage("");
     } catch (error) {
       setErrorMessage(error?.message ?? String(error));
@@ -324,6 +281,40 @@ function App() {
       }
     };
   }, []);
+
+  // 监听后台推送的剪贴板更新事件，保证窗口打开时实时刷新列表
+  useEffect(() => {
+    let unlisten = null;
+    const registerListener = async () => {
+      try {
+        unlisten = await listen("clipboard-updated", (event) => {
+          const payload = event.payload;
+          if (!payload?.item) {
+            return;
+          }
+          applyPersistedItem(payload.item, payload.mergedId ?? null);
+        });
+      } catch (error) {
+        setErrorMessage(error?.message ?? String(error));
+      }
+    };
+    registerListener();
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
+
+  // 将监听开关同步到后台，确保关闭窗口后仍遵循用户设置
+  useEffect(() => {
+    if (!isHistoryReady) {
+      return;
+    }
+    invoke("set_clipboard_monitoring", { enabled: isMonitoring }).catch((error) => {
+      setErrorMessage(error?.message ?? String(error));
+    });
+  }, [isMonitoring, isHistoryReady]);
 
   // 更新详情文本内容，直接同步到历史列表中
   const handleDetailChange = (event) => {
@@ -378,18 +369,6 @@ function App() {
       setErrorMessage(error?.message ?? String(error));
     }
   };
-
-  // 通过轮询实现剪贴板监听，支持随时暂停/恢复
-  useEffect(() => {
-    if (!isMonitoring || !isHistoryReady) {
-      return undefined;
-    }
-    captureClipboard();
-    const timer = setInterval(() => {
-      captureClipboard();
-    }, 1200);
-    return () => clearInterval(timer);
-  }, [isMonitoring, isHistoryReady]);
 
   // 根据搜索词过滤并排序：固定条目优先，其次按更新时间倒序
   const visibleItems = useMemo(() => {
@@ -483,7 +462,7 @@ function App() {
                 <Chip label={`条目 ${items.length}`} size="small" />
                 <Chip label={`固定 ${pinnedCount}`} size="small" color="secondary" />
               </Stack>
-                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+              <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
                 <TextField
                   size="small"
                   placeholder="搜索"
