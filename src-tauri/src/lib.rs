@@ -5,7 +5,7 @@ use std::sync::{
     Mutex,
 };
 use std::time::Duration;
-use tauri::{Emitter, Manager, State, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 use uuid::Uuid;
 use chrono::Utc;
 #[cfg(desktop)]
@@ -14,6 +14,15 @@ use tauri::menu::{MenuBuilder, MenuItem};
 use tauri::tray::TrayIconBuilder;
 #[cfg(desktop)]
 use arboard::Clipboard;
+
+// 优先使用固定尺寸托盘图标，避免默认图标过大导致菜单栏不可见
+#[cfg(desktop)]
+fn load_tray_icon_image() -> Option<tauri::image::Image<'static>> {
+    let bytes = include_bytes!("../icons/32x32.png");
+    tauri::image::Image::from_bytes(bytes)
+        .ok()
+        .map(|image| image.to_owned())
+}
 
 // 统一持有数据库连接与运行时状态，避免每次调用命令都反复打开文件导致性能抖动
 struct AppState {
@@ -25,6 +34,8 @@ struct AppState {
     last_clipboard_text: Mutex<Option<String>>,
     // 标记下一次需要跳过的剪贴板文本，避免应用自身写入导致重复计数
     skip_next_text: Mutex<Option<String>>,
+    // 仅允许通过托盘菜单退出应用，其他退出请求需要被拦截
+    allow_exit: AtomicBool,
 }
 
 // 与前端保持一致的历史记录上限，避免后台监听撑爆数据库
@@ -581,6 +592,11 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                // 将应用切换为辅助应用模式，隐藏 Dock 与 Cmd+Tab，仅通过托盘入口访问
+                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -594,6 +610,7 @@ pub fn run() {
                 monitoring_enabled: AtomicBool::new(true),
                 last_clipboard_text: Mutex::new(None),
                 skip_next_text: Mutex::new(None),
+                allow_exit: AtomicBool::new(false),
             });
             #[cfg(desktop)]
             {
@@ -609,11 +626,22 @@ pub fn run() {
                     .build()?;
                 let mut tray_builder = TrayIconBuilder::new()
                     .menu(&tray_menu)
-                    .tooltip("我的剪贴板");
-                if let Some(icon) = app.default_window_icon().cloned() {
+                    .tooltip("我的剪贴板")
+                    // 左键点击直接触发点击事件，退出改为右键/菜单操作
+                    .show_menu_on_left_click(false);
+                if let Some(icon) = load_tray_icon_image()
+                    .or_else(|| app.default_window_icon().cloned())
+                {
                     tray_builder = tray_builder.icon(icon);
                 }
-                let _tray = tray_builder.build(app)?;
+                #[cfg(target_os = "macos")]
+                {
+                    // 使用模板图标适配深浅色菜单栏，避免图标不可见
+                    tray_builder = tray_builder.icon_as_template(true);
+                }
+                let tray = tray_builder.build(app)?;
+                // 保持托盘实例存活，避免离开作用域后图标被自动移除
+                app.manage(tray);
                 // 启动后台剪贴板监听任务，确保隐藏窗口后仍可记录
                 start_clipboard_watcher(app.handle().clone());
             }
@@ -638,6 +666,10 @@ pub fn run() {
                 show_main_window(app);
             }
             if event.id() == "quit" {
+                // 标记为允许退出，确保只通过托盘菜单触发真正退出
+                app.state::<AppState>()
+                    .allow_exit
+                    .store(true, Ordering::Relaxed);
                 app.exit(0);
             }
         })
@@ -654,7 +686,25 @@ pub fn run() {
                 let _ = window.hide();
             }
         });
-    builder
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+    #[cfg(desktop)]
+    {
+        let app = builder
+            .build(tauri::generate_context!())
+            .expect("error while building tauri application");
+        // 拦截系统级退出请求，确保只能通过托盘菜单真正退出
+        app.run(|app_handle, event| {
+            if let RunEvent::ExitRequested { api, .. } = event {
+                let state = app_handle.state::<AppState>();
+                if !state.allow_exit.load(Ordering::Relaxed) {
+                    api.prevent_exit();
+                }
+            }
+        });
+    }
+    #[cfg(not(desktop))]
+    {
+        builder
+            .run(tauri::generate_context!())
+            .expect("error while running tauri application");
+    }
 }
