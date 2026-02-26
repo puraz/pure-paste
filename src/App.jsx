@@ -1251,7 +1251,7 @@ function App() {
           severity="success"
           variant="filled"
           onClose={() => setIsCopyToastOpen(false)}
-          sx={{ width: "95%" }}
+          sx={{ width: "100%" }}
         >
           复制成功
         </Alert>
