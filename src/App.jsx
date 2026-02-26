@@ -21,6 +21,7 @@ import {
   Typography,
 } from "@mui/material";
 import { clear, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -29,6 +30,21 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 const MAX_HISTORY = 80;
 // 详情编辑保存节流间隔，避免每次键入都触发数据库写入
 const DETAIL_SAVE_DELAY = 600;
+// 标准化链接地址，只接受完整 http/https，返回 null 表示无效
+const normalizeHttpUrl = (value) => {
+  if (!value) {
+    return null;
+  }
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return url.toString();
+    }
+  } catch {
+    return null;
+  }
+  return null;
+};
 
 function App() {
   // 剪贴板历史列表，包含内容、时间、固定状态与命中次数等元信息
@@ -212,6 +228,18 @@ function App() {
     }
   };
 
+  // 使用系统默认浏览器打开链接
+  const handleOpenLink = async (url) => {
+    if (!url) {
+      return;
+    }
+    try {
+      await openUrl(url);
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    }
+  };
 
   // 真正执行详情编辑写入，避免每次键入都触发 SQL
   const persistDetailChange = async (payload) => {
@@ -476,6 +504,9 @@ function App() {
   }, [visibleItems, selectedId]);
 
   const selectedItem = visibleItems.find((item) => item.id === selectedId) ?? null;
+  // 仅当选中条目是完整链接时返回标准化地址，便于控制按钮状态
+  const selectedItemUrl = selectedItem ? normalizeHttpUrl(selectedItem.text) : null;
+  const canOpenLink = Boolean(selectedItemUrl);
   const pinnedCount = items.filter((item) => item.pinned).length;
 
   return (
@@ -538,16 +569,16 @@ function App() {
               <Paper
                 variant="outlined"
                 sx={{
-                  p: 2,
+                  p: 1.5,
                   borderRadius: 1.5,
                   display: "flex",
                   flexDirection: "column",
-                  gap: 1.5,
+                  gap: 1,
                 }}
               >
                 <Stack
                   direction="row"
-                  spacing={1.5}
+                  spacing={1}
                   alignItems="center"
                   justifyContent="space-between"
                 >
@@ -582,16 +613,16 @@ function App() {
               <Paper
                 variant="outlined"
                 sx={{
-                  p: 2,
+                  p: 1.5,
                   borderRadius: 1.5,
                   display: "flex",
                   flexDirection: "column",
-                  gap: 1.5,
+                  gap: 1,
                 }}
               >
                 <Stack
                   direction="row"
-                  spacing={1.5}
+                  spacing={1}
                   alignItems="center"
                   justifyContent="space-between"
                 >
@@ -808,6 +839,14 @@ function App() {
                       disabled={!selectedItem}
                     >
                       复制
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={() => handleOpenLink(selectedItemUrl)}
+                      disabled={!canOpenLink}
+                    >
+                      打开链接
                     </Button>
                     <Button
                       variant="outlined"
