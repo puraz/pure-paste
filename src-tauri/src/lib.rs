@@ -15,6 +15,8 @@ use tauri::tray::TrayIconBuilder;
 #[cfg(desktop)]
 use arboard::Clipboard;
 use tauri_plugin_autostart::ManagerExt;
+#[cfg(desktop)]
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 // 优先使用固定尺寸托盘图标，避免默认图标过大导致菜单栏不可见
 #[cfg(desktop)]
@@ -55,7 +57,8 @@ fn open_settings_window(app: &tauri::AppHandle) {
             tauri::WebviewUrl::App("index.html".into()),
         )
         .title("设置")
-        .inner_size(520.0, 360.0)
+        // 增大设置窗口高度，避免设置项增多后底部被遮挡
+        .inner_size(520.0, 480.0)
         .resizable(false)
         .skip_taskbar(true)
         .build();
@@ -70,6 +73,8 @@ fn open_settings_window(app: &tauri::AppHandle) {
 const MAX_HISTORY: i64 = 80;
 // 后台轮询间隔，兼顾响应速度与 CPU 占用
 const CLIPBOARD_POLL_INTERVAL_MS: u64 = 900;
+// 快捷键配置在数据库中对应的键名，统一集中管理
+const OPEN_WINDOW_SHORTCUT_KEY: &str = "open_window_shortcut";
 
 // 剪贴板历史记录的数据结构，字段与前端状态保持一致
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -137,8 +142,43 @@ fn init_db(conn: &Connection) -> Result<(), rusqlite::Error> {
             pinned INTEGER NOT NULL DEFAULT 0,
             count INTEGER NOT NULL DEFAULT 1
         );
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
         ",
     )?;
+    Ok(())
+}
+
+// 读取通用配置项，找不到时返回 None
+fn get_app_setting(conn: &Connection, key: &str) -> Result<Option<String>, rusqlite::Error> {
+    conn.query_row(
+        "SELECT value FROM app_settings WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+// 写入通用配置项，value 为空时删除对应配置
+fn set_app_setting(
+    conn: &Connection,
+    key: &str,
+    value: Option<String>,
+) -> Result<(), rusqlite::Error> {
+    if let Some(value) = value {
+        conn.execute(
+            "
+            INSERT INTO app_settings (key, value)
+            VALUES (?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            ",
+            params![key, value],
+        )?;
+    } else {
+        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+    }
     Ok(())
 }
 
@@ -486,6 +526,45 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+// 注册全局快捷键，用于唤起主窗口，确保快捷键触发时窗口始终可见
+#[cfg(desktop)]
+fn register_open_window_shortcut(app: &tauri::AppHandle, shortcut: &str) -> Result<(), String> {
+    app.global_shortcut()
+        .on_shortcut(shortcut, |app, _shortcut, event| {
+            if event.state == ShortcutState::Pressed {
+                show_main_window(app);
+            }
+        })
+        .map_err(|err| err.to_string())
+}
+
+// 切换全局快捷键注册状态，保障旧快捷键卸载、新快捷键生效
+#[cfg(desktop)]
+fn update_open_window_shortcut(
+    app: &tauri::AppHandle,
+    previous: Option<&str>,
+    next: Option<&str>,
+) -> Result<(), String> {
+    if previous == next {
+        return Ok(());
+    }
+    let manager = app.global_shortcut();
+    if let Some(next) = next {
+        register_open_window_shortcut(app, next)?;
+        if let Some(previous) = previous {
+            if let Err(err) = manager.unregister(previous).map_err(|err| err.to_string()) {
+                let _ = manager.unregister(next);
+                return Err(err);
+            }
+        }
+        return Ok(());
+    }
+    if let Some(previous) = previous {
+        manager.unregister(previous).map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
 // 后台剪贴板轮询任务，负责捕获系统剪贴板并写入数据库
 #[cfg(desktop)]
 fn start_clipboard_watcher(app_handle: tauri::AppHandle) {
@@ -632,6 +711,51 @@ fn set_autostart_enabled(app: tauri::AppHandle, enabled: bool) -> Result<bool, S
     manager.is_enabled().map_err(|err| err.to_string())
 }
 
+// 读取打开主窗口的快捷键设置，供设置页初始化展示
+#[tauri::command]
+fn get_open_window_shortcut(state: State<AppState>) -> Result<Option<String>, String> {
+    let conn = state
+        .db
+        .lock()
+        .map_err(|_| "数据库连接被占用，无法读取快捷键设置".to_string())?;
+    get_app_setting(&conn, OPEN_WINDOW_SHORTCUT_KEY).map_err(|err| err.to_string())
+}
+
+// 更新打开主窗口的快捷键设置，并同步注册/取消全局快捷键
+#[tauri::command]
+fn set_open_window_shortcut(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    shortcut: Option<String>,
+) -> Result<Option<String>, String> {
+    let normalized = shortcut
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let previous = {
+        let conn = state
+            .db
+            .lock()
+            .map_err(|_| "数据库连接被占用，无法读取快捷键设置".to_string())?;
+        get_app_setting(&conn, OPEN_WINDOW_SHORTCUT_KEY).map_err(|err| err.to_string())?
+    };
+    if previous == normalized {
+        return Ok(normalized);
+    }
+    #[cfg(desktop)]
+    {
+        update_open_window_shortcut(&app, previous.as_deref(), normalized.as_deref())?;
+    }
+    {
+        let conn = state
+            .db
+            .lock()
+            .map_err(|_| "数据库连接被占用，无法写入快捷键设置".to_string())?;
+        set_app_setting(&conn, OPEN_WINDOW_SHORTCUT_KEY, normalized.clone())
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(normalized)
+}
+
 // 托盘或前端触发打开设置窗口，避免多处重复创建逻辑
 #[tauri::command]
 fn open_settings_window_command(app: tauri::AppHandle) -> Result<(), String> {
@@ -647,8 +771,10 @@ pub fn run() {
     // 注册剪贴板插件，并在启动时初始化 SQLite，确保历史记录持久化
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .setup(|app| {
+        .plugin(tauri_plugin_clipboard_manager::init());
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_global_shortcut::Builder::new().build());
+    let builder = builder.setup(|app| {
             #[cfg(target_os = "macos")]
             {
                 // 将应用切换为辅助应用模式，隐藏 Dock 与 Cmd+Tab，仅通过托盘入口访问
@@ -662,6 +788,9 @@ pub fn run() {
             let db_path = app_data_dir.join("clipboard.db");
             let conn = Connection::open(db_path).map_err(|err| err.to_string())?;
             init_db(&conn).map_err(|err| err.to_string())?;
+            // 启动前读取快捷键设置，稍后用于注册全局快捷键
+            let open_window_shortcut =
+                get_app_setting(&conn, OPEN_WINDOW_SHORTCUT_KEY).map_err(|err| err.to_string())?;
             app.manage(AppState {
                 db: Mutex::new(conn),
                 monitoring_enabled: AtomicBool::new(true),
@@ -671,6 +800,10 @@ pub fn run() {
             });
             #[cfg(desktop)]
             {
+                // 根据已保存的配置注册全局快捷键，保证启动后即可生效
+                if let Some(shortcut) = open_window_shortcut.as_deref() {
+                    register_open_window_shortcut(&app.handle(), shortcut)?;
+                }
                 // 初始化开机自启动插件，保证设置页可以读取/切换系统自启动状态
                 app.handle()
                     .plugin(tauri_plugin_autostart::init(
@@ -726,6 +859,8 @@ pub fn run() {
             mark_clipboard_skip,
             get_autostart_status,
             set_autostart_enabled,
+            get_open_window_shortcut,
+            set_open_window_shortcut,
             open_settings_window_command
         ]);
     #[cfg(desktop)]

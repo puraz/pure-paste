@@ -46,6 +46,37 @@ const normalizeHttpUrl = (value) => {
   return null;
 };
 
+// 将用户按键组合转为 Tauri 2.x 可识别的快捷键格式
+const buildShortcutFromEvent = (event) => {
+  const rawKey = event.key;
+  if (rawKey === "Shift" || rawKey === "Control" || rawKey === "Alt" || rawKey === "Meta") {
+    return "";
+  }
+  let keyLabel = "";
+  if (rawKey === " ") {
+    keyLabel = "Space";
+  } else if (rawKey.length === 1) {
+    keyLabel = rawKey.toUpperCase();
+  } else {
+    keyLabel = rawKey;
+  }
+  const parts = [];
+  if (event.metaKey) {
+    parts.push("Command");
+  }
+  if (event.ctrlKey) {
+    parts.push("Ctrl");
+  }
+  if (event.altKey) {
+    parts.push("Alt");
+  }
+  if (event.shiftKey) {
+    parts.push("Shift");
+  }
+  parts.push(keyLabel);
+  return parts.join("+");
+};
+
 function App() {
   // 剪贴板历史列表，包含内容、时间、固定状态与命中次数等元信息
   const [items, setItems] = useState([]);
@@ -69,6 +100,16 @@ function App() {
   const [isAutostartLoading, setIsAutostartLoading] = useState(false);
   // 记录监听状态是否已读取完成，避免首次进入时覆盖后台状态
   const [isMonitoringReady, setIsMonitoringReady] = useState(false);
+  // 打开剪贴板窗口的快捷键配置，供设置页展示和编辑
+  const [openWindowShortcut, setOpenWindowShortcut] = useState("");
+  // 设置页正在编辑的快捷键草稿，避免输入中覆盖已保存值
+  const [shortcutDraft, setShortcutDraft] = useState("");
+  // 快捷键配置加载状态，避免重复点击导致状态错乱
+  const [isShortcutLoading, setIsShortcutLoading] = useState(false);
+  // 快捷键保存过程状态，用于按钮禁用与文案反馈
+  const [isShortcutSaving, setIsShortcutSaving] = useState(false);
+  // 是否处于快捷键录制模式，录制时拦截下一次按键组合
+  const [isShortcutRecording, setIsShortcutRecording] = useState(false);
 
   // 识别当前窗口类型，用于区分主窗口与设置窗口渲染
   const isSettingsWindow = useMemo(() => {
@@ -197,6 +238,57 @@ function App() {
       setErrorMessage(error?.message ?? String(error));
     } finally {
       setIsAutostartLoading(false);
+    }
+  };
+
+  // 读取打开剪贴板窗口的快捷键设置，供设置页初始化展示
+  const loadOpenWindowShortcut = async () => {
+    setIsShortcutLoading(true);
+    try {
+      const shortcut = await invoke("get_open_window_shortcut");
+      const value = shortcut ? String(shortcut) : "";
+      setOpenWindowShortcut(value);
+      setShortcutDraft(value);
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    } finally {
+      setIsShortcutLoading(false);
+    }
+  };
+
+  // 保存快捷键设置，并同步刷新已生效的快捷键文案
+  const handleShortcutSave = async () => {
+    const normalized = shortcutDraft.trim();
+    setIsShortcutSaving(true);
+    try {
+      const saved = await invoke("set_open_window_shortcut", {
+        shortcut: normalized ? normalized : null,
+      });
+      const value = saved ? String(saved) : "";
+      setOpenWindowShortcut(value);
+      setShortcutDraft(value);
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    } finally {
+      setIsShortcutSaving(false);
+    }
+  };
+
+  // 清空快捷键设置，取消全局快捷键占用
+  const handleShortcutClear = async () => {
+    setIsShortcutSaving(true);
+    try {
+      const saved = await invoke("set_open_window_shortcut", { shortcut: null });
+      const value = saved ? String(saved) : "";
+      setOpenWindowShortcut(value);
+      setShortcutDraft(value);
+      setErrorMessage("");
+    } catch (error) {
+      setErrorMessage(error?.message ?? String(error));
+    } finally {
+      setIsShortcutSaving(false);
     }
   };
 
@@ -377,6 +469,7 @@ function App() {
     if (isSettingsWindow) {
       loadMonitoringStatus();
       loadAutostartStatus();
+      loadOpenWindowShortcut();
       return;
     }
     loadHistory();
@@ -386,6 +479,31 @@ function App() {
       }
     };
   }, [isSettingsWindow]);
+
+  // 设置页快捷键录制时监听全局按键，捕获组合键并写入草稿
+  useEffect(() => {
+    if (!isSettingsWindow || !isShortcutRecording) {
+      return;
+    }
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setIsShortcutRecording(false);
+        return;
+      }
+      const shortcut = buildShortcutFromEvent(event);
+      if (!shortcut) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      setShortcutDraft(shortcut);
+      setIsShortcutRecording(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isSettingsWindow, isShortcutRecording]);
 
   // 监听后台推送的剪贴板更新事件，保证窗口打开时实时刷新列表
   useEffect(() => {
@@ -508,6 +626,8 @@ function App() {
   const selectedItemUrl = selectedItem ? normalizeHttpUrl(selectedItem.text) : null;
   const canOpenLink = Boolean(selectedItemUrl);
   const pinnedCount = items.filter((item) => item.pinned).length;
+  const shortcutDisplay = openWindowShortcut || "未设置";
+  const shortcutDirty = shortcutDraft.trim() !== openWindowShortcut;
 
   return (
     <Box
@@ -559,6 +679,8 @@ function App() {
                 // 设置页同样占满卡片可用高度，避免布局跳动
                 flex: 1,
                 minHeight: 0,
+                // 设置内容可滚动，避免窗口高度不足时遮挡底部配置
+                overflowY: "auto",
               }}
             >
               {errorMessage ? (
@@ -607,6 +729,82 @@ function App() {
                     </Typography>
                   </Stack>
                 </Stack>
+              </Paper>
+
+              {/* 打开剪贴板窗口快捷键设置，方便用户快速唤起主窗口 */}
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 1.5,
+                  borderRadius: 1.5,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 1,
+                }}
+              >
+                <Stack
+                  direction={{ xs: "column", md: "row" }}
+                  spacing={1}
+                  alignItems={{ xs: "flex-start", md: "center" }}
+                  justifyContent="space-between"
+                >
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                      打开剪贴板快捷键
+                    </Typography>
+                    <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                      设置后可在任意界面快速唤起剪贴板窗口
+                    </Typography>
+                  </Box>
+                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={() =>
+                        setIsShortcutRecording((prev) => !prev)
+                      }
+                      disabled={isShortcutLoading || isShortcutSaving}
+                    >
+                      {isShortcutRecording ? "等待按键..." : "录制"}
+                    </Button>
+                    <Button
+                      variant="contained"
+                      size="small"
+                      onClick={handleShortcutSave}
+                      disabled={
+                        isShortcutLoading || isShortcutSaving || !shortcutDirty
+                      }
+                    >
+                      保存
+                    </Button>
+                    <Button
+                      variant="text"
+                      size="small"
+                      color="secondary"
+                      onClick={handleShortcutClear}
+                      disabled={
+                        isShortcutLoading ||
+                        isShortcutSaving ||
+                        (!shortcutDraft && !openWindowShortcut)
+                      }
+                    >
+                      清空
+                    </Button>
+                  </Stack>
+                </Stack>
+                <TextField
+                  size="small"
+                  fullWidth
+                  placeholder="例如：Ctrl+Shift+V 或 Command+Shift+V"
+                  value={shortcutDraft}
+                  onChange={(event) => setShortcutDraft(event.target.value)}
+                  disabled={isShortcutLoading || isShortcutSaving}
+                  helperText={
+                    isShortcutRecording
+                      ? "请直接按下组合键，按 Esc 取消录制"
+                      : `当前生效：${shortcutDisplay}`
+                  }
+                />
               </Paper>
 
               {/* 剪贴板监听开关，控制后台是否持续记录 */}
