@@ -26,7 +26,7 @@ import {
   useMediaQuery,
 } from "@mui/material";
 import { useTheme } from "@mui/material/styles";
-import { clear, writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -445,16 +445,6 @@ function App() {
     }
   };
 
-  // 清空系统剪贴板，避免旧值继续触发后台记录
-  const handleClearClipboard = async () => {
-    try {
-      await clear();
-      setErrorMessage("");
-    } catch (error) {
-      setErrorMessage(error?.message ?? String(error));
-    }
-  };
-
   // 请求清空动作时先弹出确认提示，避免误触直接清空
   const requestClear = (type) => {
     setConfirmAction(type);
@@ -473,9 +463,6 @@ function App() {
     if (action === "history") {
       await handleClearHistory();
       return;
-    }
-    if (action === "clipboard") {
-      await handleClearClipboard();
     }
   };
 
@@ -948,14 +935,6 @@ function App() {
                         清空历史
                       </Button>
                       <Button
-                        variant="outlined"
-                        size="small"
-                        onClick={() => requestClear("clipboard")}
-                        sx={{ px: 1.25, minWidth: 0 }}
-                      >
-                        清空剪贴板
-                      </Button>
-                      <Button
                         variant="text"
                         size="small"
                         onClick={openSettingsWindow}
@@ -980,13 +959,6 @@ function App() {
                       onClick={() => requestClear("history")}
                     >
                       清空历史
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      size="small"
-                      onClick={() => requestClear("clipboard")}
-                    >
-                      清空剪贴板
                     </Button>
                     <Button variant="text" size="small" onClick={openSettingsWindow}>
                       设置
@@ -1226,9 +1198,7 @@ function App() {
         <DialogTitle>确认清空</DialogTitle>
         <DialogContent>
           <DialogContentText>
-            {confirmAction === "history"
-              ? "确定要清空全部历史记录吗？此操作不可撤销。"
-              : "确定要清空系统剪贴板吗？清空后无法恢复。"}
+            确定要清空全部历史记录吗？此操作不可撤销。
           </DialogContentText>
         </DialogContent>
         <DialogActions>
