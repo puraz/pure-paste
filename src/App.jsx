@@ -1080,14 +1080,16 @@ function App() {
                     >
                       复制
                     </Button>
-                    <Button
-                      variant="outlined"
-                      size="small"
-                      onClick={() => handleOpenLink(selectedItemUrl)}
-                      disabled={!canOpenLink}
-                    >
-                      打开链接
-                    </Button>
+                    {/* 仅当当前内容是可识别链接时才显示打开入口，避免无效操作 */}
+                    {canOpenLink ? (
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={() => handleOpenLink(selectedItemUrl)}
+                      >
+                        打开链接
+                      </Button>
+                    ) : null}
                     <Button
                       variant="outlined"
                       size="small"
