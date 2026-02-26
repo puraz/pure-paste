@@ -110,6 +110,8 @@ function App() {
   const [isShortcutSaving, setIsShortcutSaving] = useState(false);
   // 是否处于快捷键录制模式，录制时拦截下一次按键组合
   const [isShortcutRecording, setIsShortcutRecording] = useState(false);
+  // 搜索输入框引用，便于应用内快捷键聚焦
+  const searchInputRef = useRef(null);
 
   // 识别当前窗口类型，用于区分主窗口与设置窗口渲染
   const isSettingsWindow = useMemo(() => {
@@ -477,6 +479,45 @@ function App() {
       if (detailSaveTimerRef.current) {
         clearTimeout(detailSaveTimerRef.current);
       }
+    };
+  }, [isSettingsWindow]);
+
+  // 监听应用内快捷键，Mac 使用 Command+F，其它平台使用 Ctrl+F
+  useEffect(() => {
+    if (isSettingsWindow) {
+      return;
+    }
+    const isMac = navigator.platform?.toLowerCase().includes("mac");
+    const handleKeyDown = (event) => {
+      const target = event.target;
+      // 当前聚焦在可编辑控件时不触发快捷键，避免打断输入
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.getAttribute("role") === "textbox")
+      ) {
+        return;
+      }
+      const key = event.key?.toLowerCase();
+      if (key !== "f") {
+        return;
+      }
+      const isTrigger = isMac ? event.metaKey : event.ctrlKey;
+      if (!isTrigger) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (searchInputRef.current) {
+        searchInputRef.current.focus();
+        searchInputRef.current.select();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
     };
   }, [isSettingsWindow]);
 
@@ -875,6 +916,7 @@ function App() {
                     placeholder="搜索"
                     value={query}
                     onChange={(event) => setQuery(event.target.value)}
+                    inputRef={searchInputRef}
                   />
                   <Button
                     variant="outlined"
