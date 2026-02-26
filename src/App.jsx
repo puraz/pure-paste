@@ -11,15 +11,21 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
+  IconButton,
   List,
   ListItemButton,
   ListItemText,
   Paper,
   Stack,
   Switch,
+  SvgIcon,
   TextField,
+  Snackbar,
+  Tooltip,
   Typography,
+  useMediaQuery,
 } from "@mui/material";
+import { useTheme } from "@mui/material/styles";
 import { clear, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke } from "@tauri-apps/api/core";
@@ -30,6 +36,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 const MAX_HISTORY = 80;
 // 详情编辑保存节流间隔，避免每次键入都触发数据库写入
 const DETAIL_SAVE_DELAY = 600;
+// 轻量复制图标，避免额外引入图标依赖包导致构建体积变大
+const CopyIcon = (props) => (
+  <SvgIcon {...props} viewBox="0 0 24 24">
+    <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z" />
+  </SvgIcon>
+);
 // 标准化链接地址，只接受完整 http/https，返回 null 表示无效
 const normalizeHttpUrl = (value) => {
   if (!value) {
@@ -94,6 +106,8 @@ function App() {
   const [confirmAction, setConfirmAction] = useState("");
   // 控制确认弹窗是否显示，避免关闭动画期间文案闪动
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
+  // 控制复制成功提示的显示状态，避免频繁复制时提示残留
+  const [isCopyToastOpen, setIsCopyToastOpen] = useState(false);
   // 记录系统开机自启动状态，供设置页开关展示
   const [autostartEnabled, setAutostartEnabled] = useState(false);
   // 记录开机自启动读取/切换过程，避免频繁点击导致状态错乱
@@ -112,6 +126,9 @@ function App() {
   const [isShortcutRecording, setIsShortcutRecording] = useState(false);
   // 搜索输入框引用，便于应用内快捷键聚焦
   const searchInputRef = useRef(null);
+  // 基于主题断点判断当前窗口是否接近移动端形态，用于隐藏详情与写入区
+  const theme = useTheme();
+  const isCompactLayout = useMediaQuery(theme.breakpoints.down("sm"));
 
   // 识别当前窗口类型，用于区分主窗口与设置窗口渲染
   const isSettingsWindow = useMemo(() => {
@@ -390,6 +407,7 @@ function App() {
       await writeText(item.text, { label: "pure-paster" });
       await invoke("mark_clipboard_skip", { text: item.text });
       await upsertItem(item.text);
+      setIsCopyToastOpen(true);
     } catch (error) {
       setErrorMessage(error?.message ?? String(error));
     }
@@ -900,42 +918,81 @@ function App() {
               <Stack
                 direction={{ xs: "column", md: "row" }}
                 spacing={1.5}
-                alignItems={{ xs: "flex-start", md: "center" }}
+                alignItems={{ xs: "stretch", md: "center" }}
                 justifyContent="space-between"
               >
-                <Stack direction="row" spacing={1.5} alignItems="center" flexWrap="wrap">
-                  <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                    剪贴板
-                  </Typography>
-                  <Chip label={`条目 ${items.length}`} size="small" />
-                  <Chip label={`固定 ${pinnedCount}`} size="small" color="secondary" />
-                </Stack>
-                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
-                  <TextField
-                    size="small"
-                    placeholder="搜索"
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    inputRef={searchInputRef}
-                  />
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={() => requestClear("history")}
-                  >
-                    清空历史
-                  </Button>
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={() => requestClear("clipboard")}
-                  >
-                    清空剪贴板
-                  </Button>
-                  <Button variant="text" size="small" onClick={openSettingsWindow}>
-                    设置
-                  </Button>
-                </Stack>
+                {/* 移动端形态下压缩纵向空间：搜索一行，操作一行 */}
+                {isCompactLayout ? (
+                  <Stack direction="column" spacing={0.75} sx={{ width: "100%" }}>
+                    <TextField
+                      size="small"
+                      placeholder="搜索"
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      inputRef={searchInputRef}
+                      fullWidth
+                    />
+                    <Stack
+                      direction="row"
+                      spacing={0.75}
+                      alignItems="center"
+                      flexWrap="wrap"
+                      sx={{ width: "100%" }}
+                    >
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={() => requestClear("history")}
+                        sx={{ px: 1.25, minWidth: 0 }}
+                      >
+                        清空历史
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={() => requestClear("clipboard")}
+                        sx={{ px: 1.25, minWidth: 0 }}
+                      >
+                        清空剪贴板
+                      </Button>
+                      <Button
+                        variant="text"
+                        size="small"
+                        onClick={openSettingsWindow}
+                        sx={{ px: 1.25, minWidth: 0 }}
+                      >
+                        设置
+                      </Button>
+                    </Stack>
+                  </Stack>
+                ) : (
+                  <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap">
+                    <TextField
+                      size="small"
+                      placeholder="搜索"
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      inputRef={searchInputRef}
+                    />
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={() => requestClear("history")}
+                    >
+                      清空历史
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      onClick={() => requestClear("clipboard")}
+                    >
+                      清空剪贴板
+                    </Button>
+                    <Button variant="text" size="small" onClick={openSettingsWindow}>
+                      设置
+                    </Button>
+                  </Stack>
+                )}
               </Stack>
 
               {errorMessage ? (
@@ -972,6 +1029,13 @@ function App() {
                   >
                     <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
                       历史
+                    </Typography>
+                    {/* 用极简数字展示条目总数，减少横向占用 */}
+                    <Typography
+                      variant="caption"
+                      sx={{ color: "text.secondary", fontWeight: 600 }}
+                    >
+                      {items.length}
                     </Typography>
                   </Stack>
                   <Divider />
@@ -1015,15 +1079,24 @@ function App() {
                                   variant: "caption",
                                   sx: { color: "text.secondary" },
                                 }}
+                                sx={{ mr: 1 }}
                               />
-                              {item.pinned ? (
-                                <Chip
-                                  label="固定"
+                              <Stack direction="row" spacing={0.5} alignItems="center">
+                                {item.pinned ? (
+                                  <Chip label="固定" size="small" color="secondary" />
+                                ) : null}
+                                {/* 列表条目提供快捷复制入口，避免进入详情区操作 */}
+                                <IconButton
                                   size="small"
-                                  color="secondary"
-                                  sx={{ ml: 1 }}
-                                />
-                              ) : null}
+                                  aria-label="复制"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    handleCopy(item);
+                                  }}
+                                >
+                                  <CopyIcon fontSize="small" />
+                                </IconButton>
+                              </Stack>
                             </ListItemButton>
                           );
                         })}
@@ -1039,103 +1112,106 @@ function App() {
                   </Box>
                 </Paper>
 
-                <Paper
-                  variant="outlined"
-                  sx={{
-                    flex: 1,
-                    p: 1.5,
-                    borderRadius: 1.5,
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 1.5,
-                    // 右侧详情区同样限制在固定高度内，必要时内部滚动
-                    minHeight: 0,
-                    overflowY: "auto",
-                  }}
-                >
-                  <Stack direction="row" alignItems="center" justifyContent="space-between">
-                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                      详情
-                    </Typography>
-                    {selectedItem?.pinned ? (
-                      <Chip label="已固定" size="small" color="secondary" />
-                    ) : null}
-                  </Stack>
-                  <TextField
-                    size="small"
-                    multiline
-                    minRows={6}
-                    placeholder="请选择条目"
-                    value={selectedItem?.text ?? ""}
-                    onChange={handleDetailChange}
-                    onBlur={flushDetailPersist}
-                    disabled={!selectedItem}
-                  />
-                  <Stack direction="row" spacing={1} flexWrap="wrap">
-                    <Button
-                      variant="contained"
+                {/* 移动端形态下隐藏详情与写入区，避免空间拥挤 */}
+                {isCompactLayout ? null : (
+                  <Paper
+                    variant="outlined"
+                    sx={{
+                      flex: 1,
+                      p: 1.5,
+                      borderRadius: 1.5,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 1.5,
+                      // 右侧详情区同样限制在固定高度内，必要时内部滚动
+                      minHeight: 0,
+                      overflowY: "auto",
+                    }}
+                  >
+                    <Stack direction="row" alignItems="center" justifyContent="space-between">
+                      <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                        详情
+                      </Typography>
+                      {selectedItem?.pinned ? (
+                        <Chip label="已固定" size="small" color="secondary" />
+                      ) : null}
+                    </Stack>
+                    <TextField
                       size="small"
-                      onClick={() => handleCopy(selectedItem)}
+                      multiline
+                      minRows={6}
+                      placeholder="请选择条目"
+                      value={selectedItem?.text ?? ""}
+                      onChange={handleDetailChange}
+                      onBlur={flushDetailPersist}
                       disabled={!selectedItem}
-                    >
-                      复制
-                    </Button>
-                    {/* 仅当当前内容是可识别链接时才显示打开入口，避免无效操作 */}
-                    {canOpenLink ? (
+                    />
+                    <Stack direction="row" spacing={1} flexWrap="wrap">
+                      <Button
+                        variant="contained"
+                        size="small"
+                        onClick={() => handleCopy(selectedItem)}
+                        disabled={!selectedItem}
+                      >
+                        复制
+                      </Button>
+                      {/* 仅当当前内容是可识别链接时才显示打开入口，避免无效操作 */}
+                      {canOpenLink ? (
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          onClick={() => handleOpenLink(selectedItemUrl)}
+                        >
+                          打开链接
+                        </Button>
+                      ) : null}
                       <Button
                         variant="outlined"
                         size="small"
-                        onClick={() => handleOpenLink(selectedItemUrl)}
+                        onClick={() => togglePin(selectedItem)}
+                        disabled={!selectedItem}
                       >
-                        打开链接
+                        {selectedItem?.pinned ? "取消固定" : "固定"}
                       </Button>
-                    ) : null}
-                    <Button
-                      variant="outlined"
-                      size="small"
-                      onClick={() => togglePin(selectedItem)}
-                      disabled={!selectedItem}
-                    >
-                      {selectedItem?.pinned ? "取消固定" : "固定"}
-                    </Button>
-                    <Button
-                      variant="text"
-                      color="secondary"
-                      size="small"
-                      onClick={() => removeItem(selectedItem)}
-                      disabled={!selectedItem}
-                    >
-                      删除
-                    </Button>
-                  </Stack>
+                      <Button
+                        variant="text"
+                        color="secondary"
+                        size="small"
+                        onClick={() => removeItem(selectedItem)}
+                        disabled={!selectedItem}
+                      >
+                        删除
+                      </Button>
+                    </Stack>
 
-                  <Divider />
+                    <Divider />
 
-                  <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                    写入
-                  </Typography>
-                  <TextField
-                    size="small"
-                    multiline
-                    minRows={3}
-                    placeholder="输入文本"
-                    value={draft}
-                    onChange={(event) => setDraft(event.target.value)}
-                  />
-                  <Stack direction="row" spacing={1}>
-                    <Button variant="contained" size="small" onClick={handleWrite}>
-                      写入剪贴板
-                    </Button>
-                    <Button
-                      variant="outlined"
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                      写入
+                    </Typography>
+                    <TextField
                       size="small"
-                      onClick={() => setDraft("")}
-                      disabled={!draft}
-                    >
-                      清空
-                    </Button>
-                  </Stack>
-                </Paper>
+                      multiline
+                      minRows={3}
+                      placeholder="输入文本"
+                      value={draft}
+                      onChange={(event) => setDraft(event.target.value)}
+                    />
+                    <Stack direction="row" spacing={1}>
+                      <Button variant="contained" size="small" onClick={handleWrite}>
+                        写入剪贴板
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={() => setDraft("")}
+                        disabled={!draft}
+                      >
+                        清空
+                      </Button>
+                    </Stack>
+                  </Paper>
+                )}
               </Stack>
           </Stack>
           )}
@@ -1164,6 +1240,22 @@ function App() {
           </Button>
         </DialogActions>
       </Dialog>
+      {/* 复制成功提示，短暂展示以提升反馈感知 */}
+      <Snackbar
+        open={isCopyToastOpen}
+        autoHideDuration={1400}
+        onClose={() => setIsCopyToastOpen(false)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      >
+        <Alert
+          severity="success"
+          variant="filled"
+          onClose={() => setIsCopyToastOpen(false)}
+          sx={{ width: "95%" }}
+        >
+          复制成功
+        </Alert>
+      </Snackbar>
     </Box>
   );
 }
