@@ -10,7 +10,7 @@ import { invokeCommand } from "./invoke";
 
 /**
  * 从 SQLite 读取历史记录并恢复到前端，避免重启后只剩一条记录。
- * @param {number} limit
+ * @param {number} limit 为 0 表示不额外限制条数（后端仍会按保留天数过滤）
  * @returns {Promise<ClipboardItem[]>}
  */
 export const loadClipboardHistory = async (limit) =>
@@ -19,7 +19,7 @@ export const loadClipboardHistory = async (limit) =>
 /**
  * 新增或更新历史记录：重复文本会提升排序并增加计数。
  * @param {ClipboardUpsertPayload} item
- * @param {number} maxItems
+ * @param {number} maxItems 兼容旧字段名，实际传入“保留天数”
  * @returns {Promise<ClipboardItem>}
  */
 export const upsertClipboardItem = async (item, maxItems) =>
@@ -78,4 +78,3 @@ export const setClipboardMonitoring = async (enabled) =>
  * @returns {Promise<void>}
  */
 export const markClipboardSkip = async (text) => invokeCommand("mark_clipboard_skip", { text });
-

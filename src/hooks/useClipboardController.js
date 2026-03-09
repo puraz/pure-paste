@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { DETAIL_SAVE_DELAY, MAX_HISTORY } from "../lib/constants";
+import { DETAIL_SAVE_DELAY, HISTORY_RETENTION_DAYS } from "../lib/constants";
 import { normalizeHttpUrl } from "../lib/url";
 import { useErrorMessage } from "./useErrorMessage";
 import {
@@ -24,7 +24,8 @@ import { openSettingsWindow as openSettingsWindowCommand } from "../tauri/settin
 // 注意：这里不做复杂架构封装，只做“拆职责 + 去重复”，保持简单可维护。
 
 export const useClipboardController = (options = {}) => {
-  const maxHistory = options.maxHistory ?? MAX_HISTORY;
+  const historyRetentionDays =
+    options.historyRetentionDays ?? HISTORY_RETENTION_DAYS;
   const detailSaveDelay = options.detailSaveDelay ?? DETAIL_SAVE_DELAY;
 
   const { errorMessage, runAction } = useErrorMessage();
@@ -62,7 +63,24 @@ export const useClipboardController = (options = {}) => {
     };
   }, []);
 
-  // 将数据库返回的数据合并回前端状态，保证去重并维持上限
+  // 按“保留天数”过滤过期条目，固定条目不受时间限制
+  const pruneExpiredItems = useCallback(
+    (list) => {
+      if (!historyRetentionDays || historyRetentionDays <= 0) {
+        return list;
+      }
+      const cutoff = Date.now() - historyRetentionDays * 24 * 60 * 60 * 1000;
+      return list.filter((item) => {
+        if (item.pinned) {
+          return true;
+        }
+        return new Date(item.updatedAt).getTime() >= cutoff;
+      });
+    },
+    [historyRetentionDays],
+  );
+
+  // 将数据库返回的数据合并回前端状态，保证去重并清理过期条目
   const applyPersistedItem = useCallback(
     (nextItem, removedId) => {
       setItems((prev) => {
@@ -78,10 +96,10 @@ export const useClipboardController = (options = {}) => {
           }
           return true;
         });
-        return [nextItem, ...filtered].slice(0, maxHistory);
+        return pruneExpiredItems([nextItem, ...filtered]);
       });
     },
-    [maxHistory],
+    [pruneExpiredItems],
   );
 
   // 将文本写入历史记录：存在则更新计数并提升到顶部，同时同步到数据库
@@ -105,9 +123,9 @@ export const useClipboardController = (options = {}) => {
             count: existing.count + 1,
           };
           const rest = prev.filter((_, index) => index !== existingIndex);
-          return [updated, ...rest].slice(0, maxHistory);
+          return pruneExpiredItems([updated, ...rest]);
         }
-        return [draftItem, ...prev].slice(0, maxHistory);
+        return pruneExpiredItems([draftItem, ...prev]);
       });
 
       // 后端只需要 upsert payload 的必要字段，避免未来启用 deny_unknown_fields 时被额外字段影响
@@ -117,21 +135,23 @@ export const useClipboardController = (options = {}) => {
         createdAt: draftItem.createdAt,
         updatedAt: draftItem.updatedAt,
       };
-      const persisted = await runAction(() => upsertClipboardItem(payload, maxHistory));
+      const persisted = await runAction(() =>
+        upsertClipboardItem(payload, historyRetentionDays),
+      );
       if (persisted) {
         applyPersistedItem(persisted, null);
       }
     },
-    [applyPersistedItem, buildItem, maxHistory, runAction],
+    [applyPersistedItem, buildItem, historyRetentionDays, runAction],
   );
 
   // 启动时先加载数据库中的历史记录，避免初始化时覆盖新数据
   const loadHistory = useCallback(async () => {
-    const history = await runAction(() => loadClipboardHistory(maxHistory), []);
+    const history = await runAction(() => loadClipboardHistory(0), []);
     if (Array.isArray(history)) {
-      setItems(history);
+      setItems(pruneExpiredItems(history));
     }
-  }, [maxHistory, runAction]);
+  }, [pruneExpiredItems, runAction]);
 
   // 真正执行详情编辑写入，避免每次键入都触发 SQL
   const persistDetailChange = useCallback(

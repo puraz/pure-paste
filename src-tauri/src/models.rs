@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::{atomic::AtomicBool, Mutex};
 use uuid::Uuid;
 
-// 与前端保持一致的历史记录上限，避免后台监听撑爆数据库
-pub(crate) const MAX_HISTORY: i64 = 80;
+// 剪贴板历史保留天数：超过该天数且未固定的条目会被自动清理
+pub(crate) const HISTORY_RETENTION_DAYS: i64 = 7;
 // 后台轮询间隔，兼顾响应速度与 CPU 占用
 pub(crate) const CLIPBOARD_POLL_INTERVAL_MS: u64 = 900;
 // 快捷键配置在数据库中对应的键名，统一集中管理

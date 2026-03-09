@@ -1,10 +1,10 @@
 use crate::db::{
-    get_app_setting, map_row, set_app_setting, update_clipboard_item_text_internal,
-    upsert_clipboard_item_internal,
+    get_app_setting, map_row, prune_history_by_days, set_app_setting,
+    update_clipboard_item_text_internal, upsert_clipboard_item_internal,
 };
 use crate::models::{
     AppState, ClipboardItem, ClipboardUpdateResult, ClipboardUpsertPayload,
-    OPEN_WINDOW_SHORTCUT_KEY,
+    HISTORY_RETENTION_DAYS, OPEN_WINDOW_SHORTCUT_KEY,
 };
 use rusqlite::params;
 use std::sync::atomic::Ordering;
@@ -20,24 +20,45 @@ pub fn load_clipboard_history(
     state: State<AppState>,
     limit: i64,
 ) -> Result<Vec<ClipboardItem>, String> {
-    let limit = limit.clamp(0, 500);
     let conn = state
         .db
         .lock()
         .map_err(|_| "数据库连接被占用，无法读取历史记录".to_string())?;
-    let mut stmt = conn
-        .prepare(
+    // 每次加载前先执行一次按时间清理，避免久不写入时残留过期数据
+    prune_history_by_days(&conn, HISTORY_RETENTION_DAYS).map_err(|err| err.to_string())?;
+    let cutoff = {
+        // 使用与数据库一致的 RFC3339 格式作为截止时间，确保字符串比较可用
+        let now = chrono::Utc::now() - chrono::Duration::days(HISTORY_RETENTION_DAYS);
+        now.to_rfc3339()
+    };
+    let limit = limit.clamp(0, 500);
+    let mut stmt = if limit > 0 {
+        conn.prepare(
             "
             SELECT id, text, created_at, updated_at, pinned, count
             FROM clipboard_items
+            WHERE pinned = 1 OR updated_at >= ?1
             ORDER BY pinned DESC, updated_at DESC
-            LIMIT ?1
+            LIMIT ?2
             ",
         )
-        .map_err(|err| err.to_string())?;
-    let rows = stmt
-        .query_map(params![limit], map_row)
-        .map_err(|err| err.to_string())?;
+    } else {
+        conn.prepare(
+            "
+            SELECT id, text, created_at, updated_at, pinned, count
+            FROM clipboard_items
+            WHERE pinned = 1 OR updated_at >= ?1
+            ORDER BY pinned DESC, updated_at DESC
+            ",
+        )
+    }
+    .map_err(|err| err.to_string())?;
+    let rows = if limit > 0 {
+        stmt.query_map(params![cutoff, limit], map_row)
+    } else {
+        stmt.query_map(params![cutoff], map_row)
+    }
+    .map_err(|err| err.to_string())?;
     let mut items = Vec::new();
     for row in rows {
         items.push(row.map_err(|err| err.to_string())?);
@@ -52,6 +73,7 @@ pub fn upsert_clipboard_item(
     item: ClipboardUpsertPayload,
     max_items: i64,
 ) -> Result<ClipboardItem, String> {
+    // 兼容旧参数名 max_items，但实际含义已改为“保留天数”
     upsert_clipboard_item_internal(&state, item, max_items)
 }
 

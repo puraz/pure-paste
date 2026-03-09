@@ -1,4 +1,5 @@
 use crate::models::{AppState, ClipboardItem, ClipboardUpdateResult, ClipboardUpsertPayload};
+use chrono::{Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 // 统一执行表结构初始化，保证首次启动即可持久化
@@ -69,30 +70,29 @@ pub(crate) fn map_row(row: &rusqlite::Row) -> Result<ClipboardItem, rusqlite::Er
     })
 }
 
-// 剪贴板数据量超出上限时，删除最旧的未固定条目以控制体积
-pub(crate) fn prune_history(
-    tx: &rusqlite::Transaction,
-    max_items: i64,
+// 计算“保留天数”的截止时间字符串，统一使用 RFC3339 格式以便 SQLite 按字符串比较
+fn build_retention_cutoff(retention_days: i64) -> Option<String> {
+    if retention_days <= 0 {
+        return None;
+    }
+    let cutoff = Utc::now() - Duration::days(retention_days);
+    Some(cutoff.to_rfc3339())
+}
+
+// 按时间清理历史记录：仅删除未固定且早于截止时间的条目
+pub(crate) fn prune_history_by_days(
+    conn: &Connection,
+    retention_days: i64,
 ) -> Result<(), rusqlite::Error> {
-    if max_items <= 0 {
+    let Some(cutoff) = build_retention_cutoff(retention_days) else {
         return Ok(());
-    }
-    let total: i64 = tx.query_row("SELECT COUNT(*) FROM clipboard_items", [], |row| row.get(0))?;
-    if total <= max_items {
-        return Ok(());
-    }
-    let overflow = total - max_items;
-    tx.execute(
+    };
+    conn.execute(
         "
         DELETE FROM clipboard_items
-        WHERE id IN (
-            SELECT id FROM clipboard_items
-            WHERE pinned = 0
-            ORDER BY updated_at ASC
-            LIMIT ?1
-        )
+        WHERE pinned = 0 AND updated_at < ?1
         ",
-        params![overflow],
+        params![cutoff],
     )?;
     Ok(())
 }
@@ -101,7 +101,7 @@ pub(crate) fn prune_history(
 pub(crate) fn upsert_clipboard_item_internal(
     state: &AppState,
     item: ClipboardUpsertPayload,
-    max_items: i64,
+    retention_days: i64,
 ) -> Result<ClipboardItem, String> {
     if item.text.trim().is_empty() {
         return Err("剪贴板内容为空，已忽略写入".to_string());
@@ -148,7 +148,16 @@ pub(crate) fn upsert_clipboard_item_internal(
         .map_err(|err| err.to_string())?;
         item.id
     };
-    prune_history(&tx, max_items).map_err(|err| err.to_string())?;
+    if let Some(cutoff) = build_retention_cutoff(retention_days) {
+        tx.execute(
+            "
+            DELETE FROM clipboard_items
+            WHERE pinned = 0 AND updated_at < ?1
+            ",
+            params![cutoff],
+        )
+        .map_err(|err| err.to_string())?;
+    }
     let persisted = tx
         .query_row(
             "

@@ -201,10 +201,6 @@ export const MainView = () => {
               <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
                 历史
               </Typography>
-              {/* 用极简数字展示条目总数，减少横向占用 */}
-              <Typography variant="caption" sx={{ color: "text.secondary", fontWeight: 600 }}>
-                {items.length}
-              </Typography>
             </Stack>
             <Divider />
             <Box
@@ -389,4 +385,3 @@ export const MainView = () => {
     </>
   );
 };
-

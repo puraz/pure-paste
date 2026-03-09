@@ -6,7 +6,7 @@ use crate::db::upsert_clipboard_item_internal;
 #[cfg(desktop)]
 use crate::models::{
     build_clipboard_payload, AppState, ClipboardBroadcastPayload, CLIPBOARD_POLL_INTERVAL_MS,
-    MAX_HISTORY,
+    HISTORY_RETENTION_DAYS,
 };
 #[cfg(desktop)]
 use arboard::Clipboard;
@@ -187,7 +187,7 @@ pub(crate) fn start_clipboard_watcher(app_handle: tauri::AppHandle) {
             }
 
             let payload = build_clipboard_payload(trimmed.to_string());
-            match upsert_clipboard_item_internal(&state, payload, MAX_HISTORY) {
+            match upsert_clipboard_item_internal(&state, payload, HISTORY_RETENTION_DAYS) {
                 Ok(persisted) => {
                     if let Ok(mut last_lock) = state.last_clipboard_text.lock() {
                         *last_lock = Some(trimmed.to_string());
